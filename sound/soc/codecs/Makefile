@@ -433,3 +433,7 @@ obj-y += sdm660_cdc/
 obj-y += msm_sdw/
 obj-$(CONFIG_SND_SOC_OPA1622)	+= snd-soc-opa1622.o
 obj-$(CONFIG_SND_SOC_LM48560)	+= snd-soc-lm48560.o
+
+# TODO: remove me b/62058353
+subdir-ccflags-y += \
+	-Wno-enum-conversion
