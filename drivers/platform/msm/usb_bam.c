@@ -44,7 +44,7 @@
 #define ARRAY_INDEX_FROM_ADDR(base, addr) ((addr) - (base))
 
 #define ENABLE_EVENT_LOG 1
-static unsigned int enable_event_log = ENABLE_EVENT_LOG;
+static unsigned int enable_event_log;
 module_param(enable_event_log, uint, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(enable_event_log, "enable event logging in debug buffer");
 
@@ -1400,7 +1400,7 @@ void usb_bam_finish_suspend_(struct work_struct *w)
 
 	info_ptr = container_of(w, struct usb_bam_ipa_handshake_info,
 			finish_suspend_work);
-	cur_bam = info_ptr->cur_bam_mode;
+	cur_bam = info_ptr->bam_type;
 
 	log_event_dbg("%s: Finishing suspend sequence(BAM=%s)\n", __func__,
 			bam_enable_strings[cur_bam]);

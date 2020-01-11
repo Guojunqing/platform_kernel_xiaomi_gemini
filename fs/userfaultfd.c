@@ -459,6 +459,7 @@ static int userfaultfd_release(struct inode *inode, struct file *file)
 		}
 		new_flags = vma->vm_flags & ~(VM_UFFD_MISSING | VM_UFFD_WP);
 <<<<<<< HEAD
+<<<<<<< HEAD
 		prev = vma_merge(mm, prev, vma->vm_start, vma->vm_end,
 				 new_flags, vma->anon_vma,
 				 vma->vm_file, vma->vm_pgoff,
@@ -470,18 +471,24 @@ static int userfaultfd_release(struct inode *inode, struct file *file)
 		else
 			prev = vma;
 =======
+=======
+>>>>>>> 205988fbc6a9893d48e9bbe6a479131505165a64
 		if (still_valid) {
 			prev = vma_merge(mm, prev, vma->vm_start, vma->vm_end,
 					 new_flags, vma->anon_vma,
 					 vma->vm_file, vma->vm_pgoff,
 					 vma_policy(vma),
-					 NULL_VM_UFFD_CTX);
+					 NULL_VM_UFFD_CTX,
+					 vma_get_anon_name(vma));
 			if (prev)
 				vma = prev;
 			else
 				prev = vma;
 		}
+<<<<<<< HEAD
 >>>>>>> 6a60263487c4a8543275bcc707561369522bacba
+=======
+>>>>>>> 205988fbc6a9893d48e9bbe6a479131505165a64
 		vma->vm_flags = new_flags;
 		vma->vm_userfaultfd_ctx = NULL_VM_UFFD_CTX;
 	}

@@ -34,7 +34,7 @@
 #include <linux/workqueue.h>
 #include <../../../drivers/staging/android/timed_output.h>
 #include <linux/hrtimer.h>
-#include <linux/wakelock.h>
+#include <linux/pm_wakeup.h>
 #include <linux/mutex.h>
 #include <linux/cdev.h>
 
@@ -402,7 +402,6 @@ struct drv2604_data {
 
 	int OTP;
 
-	struct wake_lock wklock;
 	struct hrtimer timer;
 	struct mutex lock;
 	struct work_struct vibrator_work;
@@ -411,6 +410,8 @@ struct drv2604_data {
 	struct timed_output_dev to_dev;
 
 	struct drv2604_fw_header fw_header;
+
+	atomic_t disable_refcnt;
 };
 
 #endif

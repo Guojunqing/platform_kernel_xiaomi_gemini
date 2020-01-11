@@ -76,6 +76,26 @@ static int vibe_strength = DEF_VIBE_STRENGTH;
 
 static struct drv2604_data *pDRV2604data;
 
+void drv2604_disable_haptics(void)
+{
+	struct drv2604_data *drv2604;
+
+	drv2604 = READ_ONCE(pDRV2604data);
+	if (!drv2604)
+		return;
+	atomic_inc(&drv2604->disable_refcnt);
+}
+
+void drv2604_enable_haptics(void)
+{
+	struct drv2604_data *drv2604;
+
+	drv2604 = READ_ONCE(pDRV2604data);
+	if (!drv2604)
+		return;
+	atomic_dec(&drv2604->disable_refcnt);
+}
+
 static int drv2604_reg_read(struct drv2604_data *pDrv2604data, unsigned int reg)
 {
 	unsigned int val;
@@ -305,7 +325,7 @@ static void play_effect(struct drv2604_data *pDrv2604data)
 	drv2604_change_mode(pDrv2604data, WORK_IDLE, DEV_STANDBY);
 	switch_set_state(&pDrv2604data->sw_dev, SW_STATE_IDLE);
 	pDrv2604data->vibrator_is_playing = NO;
-	wake_unlock(&pDrv2604data->wklock);
+	pm_relax(pDrv2604data->device);
 }
 
 static void vibrator_off(struct drv2604_data *pDrv2604data)
@@ -326,7 +346,7 @@ static void vibrator_off(struct drv2604_data *pDrv2604data)
 			pr_err("drv2604 vibrator_off failed\n");
 		}
 		switch_set_state(&pDrv2604data->sw_dev, SW_STATE_IDLE);
-		wake_unlock(&pDrv2604data->wklock);
+		pm_relax(pDrv2604data->device);
 	}
 }
 
@@ -373,8 +393,10 @@ static void vibrator_enable(struct timed_output_dev *dev, int value)
 
 	drv2604_stop(pDrv2604data);
 
-	if (value > 0) {
-		wake_lock(&pDrv2604data->wklock);
+	if (atomic_read(&pDrv2604data->disable_refcnt) > 0){
+		// dummy
+	} else if (value > 0) {
+		pm_stay_awake(pDrv2604data->device);
 
 		if (drv2604_reg_read(pDrv2604data, RATED_VOLTAGE_REG) != actuator.rated_vol) {
 			pr_debug("drv2604: Register values reset.\n");
@@ -401,10 +423,11 @@ static void vibrator_enable(struct timed_output_dev *dev, int value)
 		pDrv2604data->sequence[0] = 3;
 	else
 		pDrv2604data->sequence[0] = 2;
-		wake_lock(&pDrv2604data->wklock);
-		pDrv2604data->should_stop = NO;
-		drv2604_change_mode(pDrv2604data, WORK_SEQ_PLAYBACK, DEV_IDLE);
-		schedule_work(&pDrv2604data->vibrator_work);
+
+	pm_stay_awake(pDrv2604data->device);
+	pDrv2604data->should_stop = NO;
+	drv2604_change_mode(pDrv2604data, WORK_SEQ_PLAYBACK, DEV_IDLE);
+	schedule_work(&pDrv2604data->vibrator_work);
 	}
 
 	mutex_unlock(&pDrv2604data->lock);
@@ -567,7 +590,7 @@ static ssize_t dev2604_write(struct file *filp, const char *buff, size_t len, lo
 	{
 		memset(&pDrv2604data->sequence, 0, WAVEFORM_SEQUENCER_MAX);
 		if (!copy_from_user(&pDrv2604data->sequence, &buff[1], len - 1)) {
-			wake_lock(&pDrv2604data->wklock);
+			pm_stay_awake(pDrv2604data->device);
 
 			pDrv2604data->should_stop = NO;
 			drv2604_change_mode(pDrv2604data, WORK_SEQ_PLAYBACK, DEV_IDLE);
@@ -589,7 +612,7 @@ static ssize_t dev2604_write(struct file *filp, const char *buff, size_t len, lo
 		if (fw_buffer != NULL) {
 			fw.size = len - 1;
 
-			wake_lock(&pDrv2604data->wklock);
+			pm_stay_awake(pDrv2604data->device);
 			result = copy_from_user(fw_buffer, &buff[1], fw.size);
 			if (result == 0) {
 				pr_debug("%s, fwsize=%lu, f:%x, l:%x\n",
@@ -597,7 +620,7 @@ static ssize_t dev2604_write(struct file *filp, const char *buff, size_t len, lo
 				fw.data = (const unsigned char *)fw_buffer;
 				drv2604_firmware_load(&fw, (void *)pDrv2604data);
 			}
-			wake_unlock(&pDrv2604data->wklock);
+			pm_relax(pDrv2604data->device);
 
 			kfree(fw_buffer);
 		}
@@ -746,7 +769,7 @@ static int Haptics_init(struct drv2604_data *pDrv2604data)
 	pDrv2604data->timer.function = vibrator_timer_func;
 	INIT_WORK(&pDrv2604data->vibrator_work, vibrator_work_routine);
 
-	wake_lock_init(&pDrv2604data->wklock, WAKE_LOCK_SUSPEND, "vibrator");
+	device_init_wakeup(pDrv2604data->device, 0);
 	mutex_init(&pDrv2604data->lock);
 
 	return 0;
@@ -876,7 +899,7 @@ static void HapticsFirmwareLoad(const struct firmware *fw, void *context)
 
 static int drv2604_probe(struct i2c_client *client, const struct i2c_device_id *id)
 {
-	struct drv2604_data *pDrv2604data;
+	struct drv2604_data *drv2604;
 
 
 	int err = 0;
@@ -886,24 +909,24 @@ static int drv2604_probe(struct i2c_client *client, const struct i2c_device_id *
 		return -ENODEV;
 	}
 
-	pDrv2604data = devm_kzalloc(&client->dev, sizeof(struct drv2604_data), GFP_KERNEL);
-	if (pDrv2604data == NULL) {
+	drv2604 = devm_kzalloc(&client->dev, sizeof(struct drv2604_data), GFP_KERNEL);
+	if (drv2604 == NULL) {
 		pr_err("%s:no memory\n", __FUNCTION__);
 		return -ENOMEM;
 	}
 
-	pDrv2604data->regmap = devm_regmap_init_i2c(client, &drv2604_i2c_regmap);
-	if (IS_ERR(pDrv2604data->regmap)) {
-		err = PTR_ERR(pDrv2604data->regmap);
+	drv2604->regmap = devm_regmap_init_i2c(client, &drv2604_i2c_regmap);
+	if (IS_ERR(drv2604->regmap)) {
+		err = PTR_ERR(drv2604->regmap);
 		pr_err("%s:Failed to allocate register map: %d\n", __FUNCTION__, err);
 		return err;
 	}
 
-	memcpy(&pDrv2604data->PlatData, &drv2604_plat_data, sizeof(struct drv2604_platform_data));
-	i2c_set_clientdata(client, pDrv2604data);
+	memcpy(&drv2604->PlatData, &drv2604_plat_data, sizeof(struct drv2604_platform_data));
+	i2c_set_clientdata(client, drv2604);
 
-	if (pDrv2604data->PlatData.GpioTrigger) {
-		err = gpio_request(pDrv2604data->PlatData.GpioTrigger, HAPTICS_DEVICE_NAME"Trigger");
+	if (drv2604->PlatData.GpioTrigger) {
+		err = gpio_request(drv2604->PlatData.GpioTrigger, HAPTICS_DEVICE_NAME"Trigger");
 		if (err < 0) {
 			pr_err("%s: GPIO request Trigger error\n", __FUNCTION__);
 			goto exit_gpio_request_failed;
@@ -919,7 +942,7 @@ static int drv2604_probe(struct i2c_client *client, const struct i2c_device_id *
 	gpio_direction_output(93, 1);
 
 	mdelay(1);
-	err = drv2604_reg_read(pDrv2604data, STATUS_REG);
+	err = drv2604_reg_read(drv2604, STATUS_REG);
 	if (err < 0) {
 		pr_err("%s, i2c bus fail (%d)\n", __FUNCTION__, err);
 		goto exit_gpio_request_failed;
@@ -928,8 +951,8 @@ static int drv2604_probe(struct i2c_client *client, const struct i2c_device_id *
 		status = err;
 	}
 	/* Read device ID */
-	pDrv2604data->device_id = (status & DEV_ID_MASK);
-	switch (pDrv2604data->device_id) {
+	drv2604->device_id = (status & DEV_ID_MASK);
+	switch (drv2604->device_id) {
 	case DRV2605_VER_1DOT1:
 		pr_info("drv2604 driver found: drv2605 v1.1.\n");
 		break;
@@ -950,49 +973,49 @@ static int drv2604_probe(struct i2c_client *client, const struct i2c_device_id *
 		break;
 	}
 
-	if (pDrv2604data->device_id != DRV2604 && pDrv2604data->device_id != DRV2604L) {
+	if (drv2604->device_id != DRV2604 && drv2604->device_id != DRV2604L) {
 		pr_debug("%s, status(0x%x),device_id(%d) fail\n",
-				__FUNCTION__, status, pDrv2604data->device_id);
+				__FUNCTION__, status, drv2604->device_id);
 		goto exit_gpio_request_failed;
 	} else {
 		err = request_firmware_nowait(THIS_MODULE, FW_ACTION_HOTPLUG,
 				"drv2604.bin", &(client->dev), GFP_KERNEL,
-				pDrv2604data, HapticsFirmwareLoad);
+				drv2604, HapticsFirmwareLoad);
 
 	}
 
-	drv2604_change_mode(pDrv2604data, WORK_IDLE, DEV_READY);
+	drv2604_change_mode(drv2604, WORK_IDLE, DEV_READY);
 	schedule_timeout_interruptible(msecs_to_jiffies(STANDBY_WAKE_DELAY));
 
-	pDrv2604data->OTP = drv2604_reg_read(pDrv2604data, AUTOCAL_MEM_INTERFACE_REG) &
+	drv2604->OTP = drv2604_reg_read(drv2604, AUTOCAL_MEM_INTERFACE_REG) &
 			AUTOCAL_MEM_INTERFACE_REG_OTP_MASK;
 
-	dev_init_platform_data(pDrv2604data);
+	dev_init_platform_data(drv2604);
 
-	if (0/*pDrv2604data->OTP == 0*/) {
-		err = dev_auto_calibrate(pDrv2604data);
+	if (0/*drv2604->OTP == 0*/) {
+		err = dev_auto_calibrate(drv2604);
 		if (err < 0) {
 			pr_err("%s, ERROR, calibration fail\n",	__FUNCTION__);
 		}
 	}
 
 	/* Put hardware in standby */
-	drv2604_change_mode(pDrv2604data, WORK_IDLE, DEV_STANDBY);
+	drv2604_change_mode(drv2604, WORK_IDLE, DEV_STANDBY);
 
-	Haptics_init(pDrv2604data);
+	Haptics_init(drv2604);
 
-	pDRV2604data = pDrv2604data;
+	WRITE_ONCE(pDRV2604data, drv2604);
 	pr_info("drv2604 probe succeeded\n");
 
 	return 0;
 
 exit_gpio_request_failed:
-	if (pDrv2604data->PlatData.GpioTrigger) {
-		gpio_free(pDrv2604data->PlatData.GpioTrigger);
+	if (drv2604->PlatData.GpioTrigger) {
+		gpio_free(drv2604->PlatData.GpioTrigger);
 	}
 
-	if (pDrv2604data->PlatData.GpioEnable) {
-		gpio_free(pDrv2604data->PlatData.GpioEnable);
+	if (drv2604->PlatData.GpioEnable) {
+		gpio_free(drv2604->PlatData.GpioEnable);
 	}
 
 	pr_err("%s failed, err=%d\n", __FUNCTION__, err);

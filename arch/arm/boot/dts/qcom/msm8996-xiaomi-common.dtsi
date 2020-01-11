@@ -515,6 +515,10 @@
 	qcom,usbin-vadc = <&pmi8994_vadc>;
 };
 
+&qusb_phy0 {
+	qcom,enable-dpdm-pulsing;
+};
+
 &i2c_7 {
 	smb1351-charger@1d {
 		compatible = "qcom,smb1351-charger";
@@ -838,6 +842,14 @@
 
 	qcom,msm-compress-dsp {
 		qcom,avs-version;
+	};
+
+	qcom,msm-audio-apr {
+		compatible = "qcom,msm-audio-apr";
+		msm_audio_apr_dummy {
+			compatible = "qcom,msm-audio-apr-dummy";
+
+		};
 	};
 
 	ssc_sensors: qcom,msm-ssc-sensors {
@@ -1768,7 +1780,7 @@
 		peripheral_mem: peripheral_region@8fe00000 {
 			compatible = "removed-dma-pool";
 			no-map;
-			reg = <0x0 0x8fe00000 0x0 0x2d00000>;
+			reg = <0x0 0x8fe00000 0x0 0x2b00000>;
 		};
 
 		/delete-node/ modem_region@88800000;
@@ -1778,9 +1790,9 @@
 			reg = <0x0 0x89c00000 0x0 0x6200000>;
 		};
 
-                ramoops_mem: ramoops_mem@ac000000 {
+		ramoops_mem: ramoops_mem@92900000 {
 			label = "ramoops_mem";
-                       reg = <0 0x9ff00000 0 0x00100000>;
+			reg = <0x0 0x92900000 0x0 0x00100000>;
 		};
 
 		/delete-node/ cont_splash_mem_hdmi@bdd00000;
@@ -1864,7 +1876,6 @@
 		/delete-property/ qcom,bcl-soc-hotplug-list;
 		qcom,ibat-monitor {
 			qcom,soc-low-threshold = <5>;
-			qcom,mitigation-freq-khz = <1132800>;
 		};
 	};
 

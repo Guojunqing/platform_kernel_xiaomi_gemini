@@ -106,7 +106,7 @@ void synchronize_irq(unsigned int irq)
 		 * running. Now verify that no threaded handlers are
 		 * active.
 		 */
-		wait_event(desc->wait_for_threads,
+		wait_event_interruptible(desc->wait_for_threads,
 			   !atomic_read(&desc->threads_active));
 	}
 }
@@ -203,6 +203,8 @@ int irq_do_set_affinity(struct irq_data *data, const struct cpumask *mask,
 	struct irq_chip *chip = irq_data_get_irq_chip(data);
 	int ret;
 
+	/* IRQs only run on the first CPU in the affinity mask; reflect that */
+	mask = cpumask_of(cpumask_first(mask));
 	ret = chip->irq_set_affinity(data, mask, force);
 	switch (ret) {
 	case IRQ_SET_MASK_OK:

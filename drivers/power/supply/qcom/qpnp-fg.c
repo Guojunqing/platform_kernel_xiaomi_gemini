@@ -251,7 +251,7 @@ static struct fg_mem_setting settings[FG_MEM_SETTING_MAX] = {
 	SETTING(IRQ_VOLT_EMPTY,	 0x458,   3,      3100),
 	SETTING(CUTOFF_VOLTAGE,	 0x40C,   0,      3400),
 	SETTING(VBAT_EST_DIFF,	 0x000,   0,      30),
-	SETTING(DELTA_SOC,	 0x450,   3,      1),
+	SETTING(DELTA_SOC,	 0x450,   3,      2),
 	SETTING(BATT_LOW,	 0x458,   0,      4200),
 	SETTING(THERM_DELAY,	 0x4AC,   3,      0),
 };
@@ -469,6 +469,11 @@ struct dischg_gain_soc {
 	u32			highc_gain[VOLT_GAIN_MAX];
 };
 
+struct fg_saved_data {
+       union power_supply_propval val;
+       unsigned long last_req_expires;
+};
+
 #define THERMAL_COEFF_N_BYTES		6
 struct fg_chip {
 	struct device		*dev;
@@ -644,6 +649,8 @@ struct fg_chip {
 	bool			batt_info_restore;
 	bool			*batt_range_ocv;
 	int			*batt_range_pct;
+
+	struct fg_saved_data    saved_data[POWER_SUPPLY_PROP_BATTERY_TYPE + 1];
 };
 
 /* FG_MEMIF DEBUGFS structures */
@@ -2240,7 +2247,7 @@ static int get_prop_capacity(struct fg_chip *chip)
 		if (chip->last_soc == FULL_SOC_RAW)
 			return FULL_CAPACITY;
 		return DIV_ROUND_CLOSEST((chip->last_soc - 1) *
-				(FULL_CAPACITY - 2),
+				(FULL_CAPACITY - 1),
 				FULL_SOC_RAW - 2) + 1;
 	}
 
@@ -2268,7 +2275,7 @@ static int get_prop_capacity(struct fg_chip *chip)
 
 			if (!vbatt_low_sts)
 				return DIV_ROUND_CLOSEST((chip->last_soc - 1) *
-						(FULL_CAPACITY - 2),
+						(FULL_CAPACITY - 1),
 						FULL_SOC_RAW - 2) + 1;
 			else
 				return EMPTY_CAPACITY;
@@ -2646,6 +2653,20 @@ out:
 	return rc;
 }
 
+// Read the beat count and write it into the beat_count arg;
+// return non-zero on failure.
+static int read_beat(struct fg_chip *chip, u8 *beat_count)
+{
+	int rc = fg_read(chip, beat_count,
+			 chip->mem_base + MEM_INTF_FG_BEAT_COUNT, 1);
+	if (rc)
+		pr_err("failed to read beat count rc=%d\n", rc);
+	else if (fg_debug_mask & FG_STATUS)
+		pr_info("current: %d, prev: %d\n", *beat_count,
+			chip->last_beat_count);
+	return rc;
+}
+
 #define SANITY_CHECK_PERIOD_MS	5000
 static void check_sanity_work(struct work_struct *work)
 {
@@ -2656,19 +2677,24 @@ static void check_sanity_work(struct work_struct *work)
 	u8 beat_count;
 	bool tried_once = false;
 
+	// Try one beat check once up-front to avoid the common
+	// case where the beat has changed and we don't need to hold
+	// the chip awake.
+	rc = read_beat(chip, &beat_count);
+	if (rc == 0 && chip->last_beat_count != beat_count) {
+		chip->last_beat_count = beat_count;
+		queue_delayed_work(system_power_efficient_wq,
+			&chip->check_sanity_work,
+			msecs_to_jiffies(SANITY_CHECK_PERIOD_MS));
+		return;
+	}
+
 	fg_stay_awake(&chip->sanity_wakeup_source);
 
 try_again:
-	rc = fg_read(chip, &beat_count,
-			chip->mem_base + MEM_INTF_FG_BEAT_COUNT, 1);
-	if (rc) {
-		pr_err("failed to read beat count rc=%d\n", rc);
+	rc = read_beat(chip, &beat_count);
+	if (rc)
 		goto resched;
-	}
-
-	if (fg_debug_mask & FG_STATUS)
-		pr_info("current: %d, prev: %d\n", beat_count,
-			chip->last_beat_count);
 
 	if (chip->last_beat_count == beat_count) {
 		if (!tried_once) {
@@ -2685,7 +2711,7 @@ try_again:
 		chip->last_beat_count = beat_count;
 	}
 resched:
-	schedule_delayed_work(
+	queue_delayed_work(system_power_efficient_wq,
 		&chip->check_sanity_work,
 		msecs_to_jiffies(SANITY_CHECK_PERIOD_MS));
 out:
@@ -2843,7 +2869,7 @@ out:
 	fg_relax(&chip->update_temp_wakeup_source);
 
 resched:
-	schedule_delayed_work(
+	queue_delayed_work(system_power_efficient_wq,
 		&chip->update_temp_work,
 		msecs_to_jiffies(TEMP_PERIOD_UPDATE_MS));
 }
@@ -4551,12 +4577,48 @@ static enum power_supply_property fg_power_props[] = {
 	POWER_SUPPLY_PROP_BATTERY_INFO_ID,
 };
 
+#define FG_RATE_LIM_MS (5 * MSEC_PER_SEC)
 static int fg_power_get_property(struct power_supply *psy,
 				       enum power_supply_property psp,
 				       union power_supply_propval *val)
 {
 	struct fg_chip *chip =  power_supply_get_drvdata(psy);
-	bool vbatt_low_sts;
+	struct fg_saved_data *sd = chip->saved_data + psp;
+	bool vbatt_low_sts, ratelimited_property = true;
+
+	switch (psp) {
+	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
+	case POWER_SUPPLY_PROP_BATTERY_TYPE:
+	case POWER_SUPPLY_PROP_VOLTAGE_MAX_DESIGN:
+	case POWER_SUPPLY_PROP_CYCLE_COUNT_ID:
+	case POWER_SUPPLY_PROP_CHARGE_NOW:
+	case POWER_SUPPLY_PROP_CHARGE_FULL:
+	case POWER_SUPPLY_PROP_SOC_REPORTING_READY:
+	case POWER_SUPPLY_PROP_HI_POWER:
+	case POWER_SUPPLY_PROP_IGNORE_FALSE_NEGATIVE_ISENSE:
+	case POWER_SUPPLY_PROP_ENABLE_JEITA_DETECTION:
+	case POWER_SUPPLY_PROP_BATTERY_INFO:
+	case POWER_SUPPLY_PROP_BATTERY_INFO_ID:
+		/* These props don't require a fg query; don't ratelimit them */
+		ratelimited_property = false;
+		break;
+	default:
+		if (!sd->last_req_expires)
+			break;
+
+		/* This takes into consideration state when battery is full
+		 * and charger is still plugged in. We want to always receive
+		 * fresh data in such case.
+		 * A case when OTG device is plugged in is skipped,
+		 * I don't feel it can drastically hurt these stats.
+		 */
+		if (chip->status == POWER_SUPPLY_STATUS_DISCHARGING &&
+			time_before(jiffies, sd->last_req_expires)) {
+			*val = sd->val;
+			return 0;
+		}
+		break;
+	}
 
 	switch (psp) {
 	case POWER_SUPPLY_PROP_BATTERY_TYPE:
@@ -4659,6 +4721,11 @@ static int fg_power_get_property(struct power_supply *psy,
 		break;
 	default:
 		return -EINVAL;
+	}
+
+	if(ratelimited_property) {
+		sd->val = *val;
+		sd->last_req_expires = jiffies + msecs_to_jiffies(FG_RATE_LIM_MS);
 	}
 
 	return 0;
@@ -7842,6 +7909,7 @@ static struct dentry *fg_dfs_create_fs(void)
 
 	pr_debug("Creating FG_MEM debugfs file-system\n");
 	root = debugfs_create_dir(DFS_ROOT_NAME, NULL);
+#ifdef CONFIG_DEBUG_FS
 	if (IS_ERR_OR_NULL(root)) {
 		pr_err("Error creating top level directory err:%ld",
 			(long)root);
@@ -7849,6 +7917,7 @@ static struct dentry *fg_dfs_create_fs(void)
 			pr_err("debugfs is not enabled in the kernel");
 		return NULL;
 	}
+#endif
 
 	dbgfs_data.help_msg.size = strlen(dbgfs_data.help_msg.data);
 
@@ -7994,6 +8063,7 @@ static int fg_common_hw_init(struct fg_chip *chip)
 	int rc;
 	int resume_soc_raw;
 	u8 val;
+	u8 buf[2];
 
 	update_iterm(chip);
 	update_cutoff_voltage(chip);
@@ -8137,6 +8207,23 @@ static int fg_common_hw_init(struct fg_chip *chip)
 		pr_err("failed to write to 0x4B3 rc=%d\n", rc);
 		return rc;
 	}
+
+	/*
+	 * At the end of this function set cut off SOC Ki coefficient from 32 to 96,
+	 * 0x408 offset 0 and 1 to 0xAA00
+	 */
+	buf[0] = 0x00;
+	buf[1] = 0xAA;
+	rc = fg_mem_write(chip, buf, 0x408, 2, 0, 1);
+	if (rc < 0)
+		pr_err("Error in configuring Sram cut off soc thread, rc=%d\n", rc);
+
+	/* Modify cut off current to 200mA. */
+	buf[0] = 0x1F;
+	buf[1] = 0x5;
+	rc = fg_mem_write(chip, buf, 0x410, 2, 0, 1);
+	if (rc < 0)
+		pr_err("Error in configuring Sram cut off current thread, rc=%d\n", rc);
 
 	return 0;
 }
@@ -8595,6 +8682,9 @@ static int fg_detect_pmic_type(struct fg_chip *chip)
 				pmic_rev_id->pmic_subtype);
 		return -EINVAL;
 	}
+
+	if (PMI8996 == pmic_rev_id->pmic_subtype)
+		fg_reset_on_lockup = 1;
 
 	return 0;
 }

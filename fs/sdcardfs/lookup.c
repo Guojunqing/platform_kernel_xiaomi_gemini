@@ -29,7 +29,8 @@ int sdcardfs_init_dentry_cache(void)
 	sdcardfs_dentry_cachep =
 		kmem_cache_create("sdcardfs_dentry",
 				  sizeof(struct sdcardfs_dentry_info),
-				  0, SLAB_RECLAIM_ACCOUNT, NULL);
+				  0, SLAB_RECLAIM_ACCOUNT | SLAB_HWCACHE_ALIGN,
+				  NULL);
 
 	return sdcardfs_dentry_cachep ? 0 : -ENOMEM;
 }
@@ -281,37 +282,31 @@ static struct dentry *__sdcardfs_lookup(struct dentry *dentry,
 	if (err == -ENOENT) {
 		struct file *file;
 		const struct cred *cred = current_cred();
+		char name_onstack[PATH_MAX] __aligned(sizeof(long));
 
 		struct sdcardfs_name_data buffer = {
 			.ctx.actor = sdcardfs_name_match,
 			.to_find = name,
-			.name = __getname(),
+			.name = name_onstack,
 			.found = false,
 		};
 
-		if (!buffer.name) {
-			err = -ENOMEM;
-			goto out;
-		}
 		file = dentry_open(lower_parent_path, O_RDONLY, cred);
 		if (IS_ERR(file)) {
 			err = PTR_ERR(file);
-			goto put_name;
+		} else {
+			err = iterate_dir(file, &buffer.ctx);
+			fput(file);
+			if (!err) {
+				if (buffer.found)
+					err = vfs_path_lookup(lower_dir_dentry,
+								lower_dir_mnt,
+								buffer.name, 0,
+								&lower_path);
+				else
+					err = -ENOENT;
+			}
 		}
-		err = iterate_dir(file, &buffer.ctx);
-		fput(file);
-		if (err)
-			goto put_name;
-
-		if (buffer.found)
-			err = vfs_path_lookup(lower_dir_dentry,
-						lower_dir_mnt,
-						buffer.name, 0,
-						&lower_path);
-		else
-			err = -ENOENT;
-put_name:
-		__putname(buffer.name);
 	}
 
 	/* no error: handle positive dentries */

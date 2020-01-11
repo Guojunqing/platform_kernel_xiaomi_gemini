@@ -2247,11 +2247,11 @@ static int get_device_tree_data(struct platform_device *pdev,
 		tmdev->wd_bark_val = wd_bark;
 	}
 
-	if (!strcmp(id->compatible, "qcom,msm8996-tsens") ||
-		(!strcmp(id->compatible, "qcom,msm8998-tsens")))
+	if (!strcmp(id->compatible, "qcom,msm8996-tsens"))
 		tmdev->tsens_type = TSENS_TYPE3;
 	else if (!strcmp(id->compatible, "qcom,msmtitanium-tsens") ||
 		(!strcmp(id->compatible, "qcom,sdm660-tsens")) ||
+		(!strcmp(id->compatible, "qcom,msm8998-tsens")) ||
 		(!strcmp(id->compatible, "qcom,sdm630-tsens")) ||
 		(!strcmp(id->compatible, "qcom,msmhamster-tsens"))) {
 		tmdev->tsens_type = TSENS_TYPE3;
@@ -2419,7 +2419,7 @@ static int tsens_tm_probe(struct platform_device *pdev)
 	tmdev->pdev = pdev;
 
 	tmdev->tsens_critical_wq = alloc_workqueue("tsens_critical_wq",
-							WQ_HIGHPRI, 0);
+							WQ_UNBOUND, 1);
 	if (!tmdev->tsens_critical_wq) {
 		rc = -ENOMEM;
 		goto fail;
